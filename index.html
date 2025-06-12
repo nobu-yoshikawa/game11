@@ -1,0 +1,220 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Blink Battle Lite</title>
+<style>
+  /* fullscreen button-like area */
+  html,body{
+    height:100vh;
+    width:100vw;
+    margin:0;
+  }
+  body{
+    display:flex;
+    justify-content:center;
+    align-items:center;
+    background:#222;                /* 初期ダーク */
+    color:#fff;
+    font-family:"Segoe UI",sans-serif;
+    font-size:clamp(2rem,10vw,6rem);
+    text-align:center;
+    white-space:pre-line;           /* \n を改行として表示 */
+    user-select:none;
+    cursor:pointer;
+    -webkit-tap-highlight-color:transparent;
+  }
+  @keyframes flash {
+    0%{transform:scale(1);}
+    50%{transform:scale(1.3);}
+    100%{transform:scale(1);}
+  }
+  .flash{animation:flash 0.25s ease-out;}
+</style>
+</head>
+<body>
+<div id="label"></div>
+
+<script>
+/**
+ * Blink Battle Lite – 反応速度計測ゲーム
+ * 1. START クリック → 背景赤「WAIT…」
+ * 2. 0.8〜3.0 秒後に緑「CLICK!」
+ * 3. 緑になった瞬間にクリック → 反応(ms)表示
+ * 4. ベストタイムは localStorage("bestReaction") に保存
+ * @author Cascade
+ */
+/* eslint-disable strict */
+"use strict";
+
+(() => {
+  const STATES = {IDLE:0,WAIT:1,READY:2};
+  const bestKey = "bestReaction";
+  const listKey = "reactionHistory";
+  const achieveKey = "achievementFlags";
+
+  const body  = document.body;
+  const label = document.getElementById("label");
+
+  let state = STATES.IDLE;
+  let timer = 0;        // setTimeout id
+  let start = 0;        // READY 開始時刻
+  let history = JSON.parse(localStorage.getItem(listKey) || "[]");
+  let best = history.length ? history[0] : (Number(localStorage.getItem(bestKey)) || null);
+  let achievements = JSON.parse(localStorage.getItem(achieveKey) || "{}");
+  let combo = 0;        // 連続 under200ms カウント
+
+  // 初期表示
+  render("START", true);
+
+  body.addEventListener("click", handleClick);
+
+  /* Web Audio for simple beeps */
+  const audioCtx = new (window.AudioContext||window.webkitAudioContext)();
+
+  function beep(freq, duration=100, start=0){
+    const t0 = audioCtx.currentTime + start;
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.frequency.value=freq;
+    gain.gain.value=0.25;
+    osc.connect(gain).connect(audioCtx.destination);
+    osc.start(t0);
+    osc.stop(t0+duration/1000);
+  }
+
+  function playTone(type){
+    switch(type){
+      case 'ready':   beep(1000,120); break;
+      case 'success': beep(1500,150); break;
+      case 'fail':    beep(200,300);  break;
+      case 'achieve': beep(800,100); beep(1200,100,0.12); break;
+      case 'combo':   beep(1800,80); beep(2000,80,0.08); break;
+    }
+  }
+
+  /** クリックハンドラ */
+  function handleClick(){
+    if(state===STATES.IDLE)  return toWait();
+    if(state===STATES.WAIT)  return falseStart();
+    if(state===STATES.READY) return recordTime();
+  }
+
+  /** WAIT 状態へ */
+  function toWait(){
+    state = STATES.WAIT;
+    body.style.background = "red";
+    render("WAIT…", false);
+    playTone('fail'); // anticipate early; will be overriden if proper click
+    timer = setTimeout(toReady, 800 + Math.random()*2200);
+  }
+
+  /** READY 状態へ */
+  function toReady(){
+    state = STATES.READY;
+    body.style.background = "green";
+    render("CLICK!", false);
+    playTone('ready');
+    start = Date.now();
+  }
+
+  /** 早すぎ失敗 */
+  function falseStart(){
+    clearTimeout(timer);
+    flash("早すぎ！", reset);
+    playTone('fail');
+
+    // ペナルティ: ランキングに +100ms （best+100 or 600ms）
+    const penalty = (best || 500) + 100;
+    history.push(penalty);
+    history.sort((a,b)=>a-b);
+    if(history.length>10) history.length=10;
+    localStorage.setItem(listKey, JSON.stringify(history));
+  }
+
+  /** 反応時間計測 */
+  function recordTime(){
+    const rt = Date.now() - start;
+    // 記録を追加し並べ替え
+    history.push(rt);
+    history.sort((a,b)=>a-b);
+    if(history.length > 10) history.length = 10; // 上位10件のみ保持
+
+    best = history[0];
+    localStorage.setItem(listKey, JSON.stringify(history));
+    localStorage.setItem(bestKey, best);
+
+    // コンボ判定
+    if(rt<=200){
+      combo++;
+      playTone('combo');
+    } else {
+      combo = 0;
+    }
+
+    const achievementMsg = checkAchievements(rt);
+    const comboMsg = combo>=2 ? `\nCOMBO x${combo}!` : "";
+    const msg = `${rt} ms\n(ベスト: ${best} ms)` + (achievementMsg ? `\n\n${achievementMsg}` : "") + comboMsg;
+    flash(msg, reset);
+    playTone('success');
+  }
+
+  /** 実績チェック */
+  function checkAchievements(rt){
+    let unlocked=null;
+    if(rt<=200){
+      achievements.under200Count = (achievements.under200Count||0)+1;
+    }
+    // 実績: 200ms以下を3回
+    if((achievements.under200Count||0)>=3 && !achievements.quick3){
+      achievements.quick3=true;
+      unlocked='実績解除: Quick 200×3!';
+      playTone('achieve');
+    }
+    if(unlocked){
+      localStorage.setItem(achieveKey, JSON.stringify(achievements));
+    } else {
+      // 更新のみ保存
+      localStorage.setItem(achieveKey, JSON.stringify(achievements));
+    }
+    return unlocked;
+  }
+
+  /** 一時表示後に cb */
+  function flash(msg, cb){
+    label.textContent = msg; // ランキングは一時表示には含めない
+    label.classList.add('flash');
+    label.addEventListener('animationend', ()=>label.classList.remove('flash'), {once:true});
+    setTimeout(cb, 1200);
+  }
+
+  /** IDLE へ戻す */
+  function reset(){
+    state = STATES.IDLE;
+    body.style.background = "#222";
+    render("START", true);
+  }
+
+  /** ラベル更新 – ベストとランキングを併記 */
+  function render(main, showRank = true){
+    let text = main;
+    if(showRank && best) text += `\nベスト: ${best} ms`;
+
+    if(showRank && history.length){
+      const ranking = history
+        .slice(0, 5)
+        .map((v, i) => `${i + 1}位: ${v} ms`)
+        .join("\n");
+      text += `\n\nランキング\n${ranking}`;
+    }
+
+    if(combo>=2 && showRank){
+      text += `\n\nCOMBO x${combo}!`;
+    }
+
+    label.textContent = text;
+  }
+})();
+</script>
+</body>
+</html>
